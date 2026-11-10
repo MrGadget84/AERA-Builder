@@ -115,7 +115,7 @@ jobs:
           LUNCH_TARGET: ${{ inputs.LUNCH_TARGET }}
           BUILD_TARGET: ${{ inputs.BUILD_TARGET }}
         run: |
-          set -euo pipefail
+          set -eo pipefail
           export AERA_BUILD_DEVICE="$DEVICE_NAME"
           source build/envsetup.sh
           export ALLOW_MISSING_DEPENDENCIES=true
