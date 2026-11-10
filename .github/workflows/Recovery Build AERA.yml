@@ -30,7 +30,7 @@ on:
       LUNCH_TARGET:
         description: "Full lunch target"
         required: true
-        default: "twrp_blossom-bp2a-eng"
+        default: "twrp_blossom-eng"
       BUILD_TARGET:
         description: "Make target"
         required: true
