@@ -1,0 +1,166 @@
+name: AERA Recovery Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      MANIFEST_URL:
+        description: "AERA manifest repository"
+        required: true
+        default: "https://github.com/AERA-Recovery/android_manifest"
+      MANIFEST_BRANCH:
+        description: "AERA manifest branch"
+        required: true
+        default: "aera-16.0"
+      DEVICE_TREE_URL:
+        description: "Blossom device tree repository"
+        required: true
+        default: "https://github.com/MrGadget84/recovery_device_xiaomi_blossom"
+      DEVICE_TREE_BRANCH:
+        description: "Device tree branch"
+        required: true
+        default: "aera-test"
+      DEVICE_PATH:
+        description: "Device tree path inside the source tree"
+        required: true
+        default: "device/xiaomi/blossom"
+      DEVICE_NAME:
+        description: "Output device directory / AERA_BUILD_DEVICE"
+        required: true
+        default: "blossom"
+      LUNCH_TARGET:
+        description: "Full lunch target"
+        required: true
+        default: "twrp_blossom-bp2a-eng"
+      BUILD_TARGET:
+        description: "Make target"
+        required: true
+        default: "recoveryimage"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.event.repository.owner.id == github.event.sender.id
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out workflow repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: rokibhasansagar/slimhub_actions@main
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            bc bison build-essential ccache curl flex g++-multilib \
+            gcc-multilib git git-lfs gnupg gperf imagemagick lib32readline-dev \
+            lib32z1-dev libelf-dev liblz4-tool libncurses-dev libsdl1.2-dev \
+            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools unzip xz-utils zip zlib1g-dev python3 python-is-python3
+
+      - name: Install repo tool
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Create source workspace
+        id: workspace
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/aera"
+          echo "path=$GITHUB_WORKSPACE/aera" >> "$GITHUB_OUTPUT"
+
+      - name: Initialize AERA source
+        working-directory: ${{ steps.workspace.outputs.path }}
+        env:
+          MANIFEST_URL: ${{ inputs.MANIFEST_URL }}
+          MANIFEST_BRANCH: ${{ inputs.MANIFEST_BRANCH }}
+        run: |
+          repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --git-lfs
+
+      - name: Sync AERA source
+        working-directory: ${{ steps.workspace.outputs.path }}
+        run: |
+          repo sync -c --no-clone-bundle --no-tags -j"$(nproc --all)"
+
+      - name: Clone Blossom device tree
+        working-directory: ${{ steps.workspace.outputs.path }}
+        env:
+          DEVICE_TREE_URL: ${{ inputs.DEVICE_TREE_URL }}
+          DEVICE_TREE_BRANCH: ${{ inputs.DEVICE_TREE_BRANCH }}
+          DEVICE_PATH: ${{ inputs.DEVICE_PATH }}
+        run: |
+          mkdir -p "$(dirname "$DEVICE_PATH")"
+          git clone --depth=1 --single-branch -b "$DEVICE_TREE_BRANCH" \
+            "$DEVICE_TREE_URL" "$DEVICE_PATH"
+
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 12
+
+      - name: Build AERA recovery
+        working-directory: ${{ steps.workspace.outputs.path }}
+        env:
+          DEVICE_NAME: ${{ inputs.DEVICE_NAME }}
+          LUNCH_TARGET: ${{ inputs.LUNCH_TARGET }}
+          BUILD_TARGET: ${{ inputs.BUILD_TARGET }}
+        run: |
+          set -euo pipefail
+          export AERA_BUILD_DEVICE="$DEVICE_NAME"
+          source build/envsetup.sh
+          export ALLOW_MISSING_DEPENDENCIES=true
+          lunch "$LUNCH_TARGET"
+          mka adbd "$BUILD_TARGET" -j"$(nproc --all)"
+
+      - name: Verify build output
+        id: output
+        working-directory: ${{ steps.workspace.outputs.path }}
+        env:
+          DEVICE_NAME: ${{ inputs.DEVICE_NAME }}
+        run: |
+          OUT_DIR="out/target/product/$DEVICE_NAME"
+          test -d "$OUT_DIR"
+          find "$OUT_DIR" -maxdepth 1 -type f \( -name '*.img' -o -name '*.zip' \) -printf '%f %s bytes\n'
+          test -s "$OUT_DIR/recovery.img"
+          echo "out_dir=$GITHUB_WORKSPACE/aera/$OUT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AERA-${{ inputs.DEVICE_NAME }}-${{ github.run_number }}
+          path: |
+            ${{ steps.output.outputs.out_dir }}/*.img
+            ${{ steps.output.outputs.out_dir }}/*.zip
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          name: AERA-${{ inputs.DEVICE_NAME }}-${{ github.run_number }}
+          tag_name: aera-${{ inputs.DEVICE_NAME }}-${{ github.run_number }}
+          body: |
+            AERA Recovery build
+
+            Manifest: ${{ inputs.MANIFEST_BRANCH }}
+            Device tree: ${{ inputs.DEVICE_TREE_BRANCH }}
+            Device: ${{ inputs.DEVICE_NAME }}
+            Lunch target: ${{ inputs.LUNCH_TARGET }}
+            Build target: ${{ inputs.BUILD_TARGET }}
+          files: |
+            ${{ steps.output.outputs.out_dir }}/*.img
+            ${{ steps.output.outputs.out_dir }}/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
